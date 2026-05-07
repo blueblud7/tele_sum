@@ -2,3 +2,4 @@
 *.session
 *.session-journal
 report_*.txt
+selected_channels.json
