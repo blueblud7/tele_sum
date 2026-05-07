@@ -1,4 +1,5 @@
 .env
+__pycache__/
 *.session
 *.session-journal
 report_*.txt
