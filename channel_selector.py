@@ -1,79 +1,52 @@
-import json
-import os
-
-SELECTION_FILE = "selected_channels.json"
+from telethon.tl.types import Channel
+import db
 
 
-def load_selection() -> list[int] | None:
-    if not os.path.exists(SELECTION_FILE):
-        return None
-    with open(SELECTION_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+def _channel_type(entity) -> str:
+    if isinstance(entity, Channel):
+        return "channel" if getattr(entity, "broadcast", False) else "supergroup"
+    return "group"
 
 
-def save_selection(channel_ids: list[int]):
-    with open(SELECTION_FILE, "w", encoding="utf-8") as f:
-        json.dump(channel_ids, f, ensure_ascii=False, indent=2)
+def sync_channels(dialogs: list) -> tuple[int, int]:
+    """현재 구독 중인 dialogs를 DB와 동기화.
 
+    - dialogs에 있는 채널: upsert, selected=TRUE
+    - dialogs에 없는데 DB에 있던 채널: selected=FALSE (구독 해제됨)
 
-def display_channels(dialogs: list) -> None:
-    print("\n" + "=" * 60)
-    print("구독 중인 채널/그룹 목록")
-    print("=" * 60)
-    for i, dialog in enumerate(dialogs, 1):
-        entity = dialog.entity
-        type_label = "채널" if hasattr(entity, "broadcast") and entity.broadcast else "그룹"
-        username = getattr(entity, "username", None)
-        username_str = f"  @{username}" if username else ""
-        print(f"  {i:3}. [{type_label}] {dialog.name}{username_str}")
-    print("=" * 60)
+    반환: (selected 개수, 구독 해제된 개수)
+    """
+    rows = []
+    for d in dialogs:
+        e = d.entity
+        rows.append((
+            int(e.id),
+            getattr(e, "username", None),
+            d.name or getattr(e, "username", None) or str(e.id),
+            _channel_type(e),
+        ))
+    current_ids = [r[0] for r in rows]
 
+    with db.connection() as conn, conn.cursor() as cur:
+        if rows:
+            cur.executemany(
+                """
+                INSERT INTO channels (id, username, title, type, selected)
+                VALUES (%s, %s, %s, %s, TRUE)
+                ON CONFLICT (id) DO UPDATE
+                  SET username   = EXCLUDED.username,
+                      title      = EXCLUDED.title,
+                      type       = EXCLUDED.type,
+                      selected   = TRUE,
+                      updated_at = NOW()
+                """,
+                rows,
+            )
+        cur.execute(
+            "UPDATE channels SET selected = FALSE, updated_at = NOW() "
+            "WHERE selected = TRUE AND NOT (id = ANY(%s)) RETURNING id",
+            (current_ids,),
+        )
+        unsubscribed = cur.rowcount or 0
 
-def select_channels(dialogs: list) -> list:
-    display_channels(dialogs)
-    print("\n선택 방법:")
-    print("  - 번호 입력 (쉼표 구분): 1,3,5")
-    print("  - 범위 입력: 1-10")
-    print("  - 전체 선택: all")
-    print()
-
-    while True:
-        raw = input("채널 선택 > ").strip()
-        if not raw:
-            continue
-
-        if raw.lower() == "all":
-            return dialogs
-
-        selected = []
-        try:
-            for part in raw.split(","):
-                part = part.strip()
-                if "-" in part:
-                    start, end = part.split("-", 1)
-                    for i in range(int(start), int(end) + 1):
-                        if 1 <= i <= len(dialogs):
-                            selected.append(dialogs[i - 1])
-                else:
-                    i = int(part)
-                    if 1 <= i <= len(dialogs):
-                        selected.append(dialogs[i - 1])
-        except ValueError:
-            print("올바른 형식으로 입력해주세요.")
-            continue
-
-        if not selected:
-            print("선택된 채널이 없습니다. 다시 입력해주세요.")
-            continue
-
-        print(f"\n선택된 채널 {len(selected)}개:")
-        for d in selected:
-            print(f"  - {d.name}")
-
-        confirm = input("\n이대로 진행할까요? (y/n/r=재선택) > ").strip().lower()
-        if confirm == "y":
-            return selected
-        elif confirm == "r":
-            continue
-        else:
-            continue
+    return len(current_ids), unsubscribed

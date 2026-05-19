@@ -1,11 +1,11 @@
 import asyncio
-import argparse
 from datetime import datetime
 import telegram_client as tc
 import channel_selector as cs
 import summarizer
 import bot_poster
 import state
+import repo
 import config
 
 
@@ -64,26 +64,26 @@ def collect_links(results: dict[str, dict], channel_data: dict[str, list[dict]],
     return out[:max_total]
 
 
-async def main(reselect: bool):
+async def main():
     await tc.client.start(phone=config.TELEGRAM_PHONE)
 
     all_dialogs = await tc.get_all_channels()
-
-    saved = cs.load_selection()
-    if saved is None or reselect:
-        selected_dialogs = cs.select_channels(all_dialogs)
-        cs.save_selection([d.entity.id for d in selected_dialogs])
-        print(f"\n선택 저장 완료")
-    else:
-        id_set = set(saved)
-        selected_dialogs = [d for d in all_dialogs if d.entity.id in id_set]
-        print(f"채널 {len(selected_dialogs)}개 모니터링")
+    n_selected, n_unsubscribed = cs.sync_channels(all_dialogs)
+    selected_dialogs = all_dialogs
+    msg = f"채널 {n_selected}개 모니터링"
+    if n_unsubscribed:
+        msg += f" (구독 해제 {n_unsubscribed}개)"
+    print(msg)
 
     last_seen = state.load()
     print(f"\n신규 메시지 수집 (lookback {config.LOOKBACK_MINUTES}분)...")
-    channel_data, max_ids, dialog_by_name = await tc.collect_new(
+    channel_data, max_ids, dialog_by_name, all_msgs = await tc.collect_new(
         selected_dialogs, last_seen, config.LOOKBACK_MINUTES
     )
+
+    if all_msgs:
+        n = repo.save_messages(all_msgs)
+        print(f"  → DB에 메시지 {n}건 저장 (중복 무시)")
 
     if not channel_data:
         print("신규 요약 대상 없음")
@@ -96,12 +96,44 @@ async def main(reselect: bool):
     print(f"\n{len(channel_data)}개 채널 요약 중...")
     results = summarizer.summarize_all(channel_data)
 
+    name_to_channel_id = {d.name: int(d.entity.id) for d in selected_dialogs}
+    for name, r in results.items():
+        summary_text = (r.get("summary") or "").strip()
+        if not summary_text:
+            continue
+        ch_id = name_to_channel_id.get(name)
+        start, end = repo.message_window(channel_data.get(name, []))
+        repo.save_summary(
+            kind="channel",
+            channel_id=ch_id,
+            content=summary_text,
+            period_start=start,
+            period_end=end,
+            model=config.OPENAI_MODEL,
+            meta={
+                "important_ids": r.get("important_ids", []),
+                "links": r.get("links", []),
+            },
+        )
+
     print("\n주제별 통합 다이제스트 생성 중...")
     digest = summarizer.aggregate_digest(results)
 
     if digest:
         print("게시 전 리뷰·정리 중...")
         digest = summarizer.review_digest(digest)
+
+    if digest:
+        all_collected = [m for msgs in channel_data.values() for m in msgs]
+        start, end = repo.message_window(all_collected)
+        repo.save_summary(
+            kind="digest",
+            content=digest,
+            period_start=start,
+            period_end=end,
+            model=config.OPENAI_MODEL,
+            meta={"channels": list(channel_data.keys())},
+        )
 
     link_entries = collect_links(results, channel_data, dialog_by_name)
     post_text = build_post_text(digest, link_entries)
@@ -126,7 +158,4 @@ async def main(reselect: bool):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="텔레그램 채널 요약기")
-    parser.add_argument("--reselect", action="store_true", help="채널 재선택")
-    args = parser.parse_args()
-    asyncio.run(main(reselect=args.reselect))
+    asyncio.run(main())
