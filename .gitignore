@@ -4,3 +4,8 @@ __pycache__/
 *.session-journal
 report_*.txt
 selected_channels.json
+last_seen.json
+channels_dump.json
+.phone_code_hash
+venv/
+logs/

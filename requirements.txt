@@ -1,3 +1,5 @@
 telethon
 openai
 python-dotenv
+requests
+psycopg[binary,pool]
