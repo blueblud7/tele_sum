@@ -114,22 +114,26 @@ def summarize_all(channel_data: dict[str, list[dict]]) -> dict[str, dict]:
     return results
 
 
-META_PROMPT = """입력은 여러 출처의 마켓 시그널 메모들이다. 이를 하나의 통합 다이제스트로 다시 써라.
+META_PROMPT = """입력은 (1) 여러 출처의 마켓 시그널 메모들과 (2) 참조 가능한 링크 목록이다.
+이를 주제별로 묶은 뉴스레터형 다이제스트로 재작성하라.
 
 JSON 응답:
-{"digest": "..."}
+{"topics": [
+  {"name": "주제명", "items": [
+    {"headline": "한 문장 핵심 사실",
+     "context": "왜 중요한지 / 배경 한 문장",
+     "ref": 링크목록의 번호 또는 null}
+  ]}
+]}
 
-digest 형식:
-- "▸ 주제명" 헤더로 그룹핑, 그 아래 "- " bullet 나열
-- 주제는 자연스럽게 분류 (예: 글로벌 매크로, 반도체, 한국 종목, 바이오 등)
-
-엄수 규칙:
-- 한 줄 bullet, 80자 이내. 사실·숫자·종목명만.
+규칙:
+- 주제는 자연스럽게 분류 (예: 글로벌 매크로, 반도체, 한국 종목, 바이오 등).
 - 같은 이슈는 한 번만 (중복 제거).
-- 채널명·매체명·출처명 절대 금지.
-- 메타 표현 절대 금지: "정리 필요", "반영", "확인", "주요 이슈는", "요약하면", "다음과 같다" 등.
+- headline: 한 문장. 사실·숫자·종목명 중심. 채널명·매체명·출처명 금지.
+- context: 한 문장. 의미·배경·파급. 메타 표현 금지("요약하면","주요 이슈는","다음과 같다" 등).
+- ref: headline의 내용과 일치하는 링크가 목록에 있으면 반드시 그 번호를 넣어라(주제·종목·사건이 같으면 매칭). 일치하는 링크가 없을 때만 null. 없는 번호 합성 금지.
+- 중요도 높은 항목 위주. 분량 채우지 말 것. 시그널 없으면 {"topics": []}.
 - 작업 과정·지시문을 본문에 옮기지 말 것. 결과 콘텐츠만.
-- 분량 채우지 말 것. 시그널 없으면 digest=""
 """
 
 
@@ -171,94 +175,138 @@ def _topic_emoji(name: str) -> str:
     return DEFAULT_TOPIC_EMOJI
 
 
-def _clean_digest_string(digest_raw) -> str:
-    if isinstance(digest_raw, list):
-        digest = "\n".join(str(x).strip() for x in digest_raw if str(x).strip())
-    else:
-        digest = str(digest_raw).strip()
+def _normalize_topics(topics_raw, link_catalog: list[tuple[str, str]]) -> list[dict]:
+    """LLM 출력 topics를 정규화. ref(번호) 또는 url(문자열) 모두 링크 목록으로 검증."""
+    url_by_idx = {i: url for i, (_, url) in enumerate(link_catalog)}
+    whitelist = set(url_by_idx.values())
 
-    items = []  # (kind, text): "topic" | "bullet" | "blank"
-    for line in digest.splitlines():
-        s = line.rstrip()
-        while s.startswith("- ") or s.startswith("• "):
-            inner = s[2:].lstrip()
-            if inner.startswith("▸") or inner.startswith("- ") or inner.startswith("• "):
-                s = inner
-            else:
-                break
-
-        if not s.strip():
-            items.append(("blank", ""))
-        elif s.startswith("▸"):
-            name = s.lstrip("▸").strip()
-            if name:
-                items.append(("topic", f"{_topic_emoji(name)} {name}"))
-        else:
-            items.append(("bullet", s))
-
-    out = []
-    for kind, text in items:
-        if kind == "blank":
+    out = []           # 순서 보존된 topic dict 리스트
+    by_name = {}        # 정규화 이름 → topic dict (동명 토픽 병합)
+    seen_headlines = set()  # 전역 중복 headline 제거
+    if not isinstance(topics_raw, list):
+        return out
+    for t in topics_raw:
+        if not isinstance(t, dict):
             continue
-        if kind == "topic" and out and out[-1] != "":
-            out.append("")
-        out.append(text)
+        name = str(t.get("name", "")).strip()
+        if not name:
+            continue
+        key = re.sub(r"\s+", "", name.lower())
+        topic = by_name.get(key)
+        if topic is None:
+            topic = {"name": name, "items": []}
+            by_name[key] = topic
+            out.append(topic)
+        items = topic["items"]
+        for it in t.get("items", []):
+            if not isinstance(it, dict):
+                continue
+            headline = _strip_urls(str(it.get("headline", "")).strip())
+            if not headline:
+                continue
+            h_key = re.sub(r"\s+", "", headline.lower())
+            if h_key in seen_headlines:
+                continue
+            seen_headlines.add(h_key)
+            context = _strip_urls(str(it.get("context", "")).strip())
 
-    return _strip_urls("\n".join(out))
+            url = None
+            ref = it.get("ref")
+            if isinstance(ref, list):
+                ref = ref[0] if ref else None
+            if isinstance(ref, (int, str)) and str(ref).strip().lstrip("-").isdigit():
+                url = url_by_idx.get(int(ref))
+            if url is None:
+                u = str(it.get("url", "")).strip()
+                if u in whitelist:
+                    url = u
+
+            items.append({
+                "headline": headline[:140],
+                "context": context[:180],
+                "url": url,
+            })
+    return [t for t in out if t["items"]]
 
 
-def _llm_digest(system_prompt: str, user_content: str) -> str:
+def _llm_topics(system_prompt: str, user_content: str,
+                link_catalog: list[tuple[str, str]], effort: str = "low") -> list[dict]:
     response = openai_client.chat.completions.create(
         model=config.OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
-        max_completion_tokens=2000,
-        reasoning_effort="minimal",
+        max_completion_tokens=4000,
+        reasoning_effort=effort,
         response_format={"type": "json_object"},
     )
     raw = (response.choices[0].message.content or "").strip()
     try:
         data = json.loads(raw)
-        return _clean_digest_string(data.get("digest", ""))
     except json.JSONDecodeError:
-        return _clean_digest_string(raw)
+        return []
+    return _normalize_topics(data.get("topics", []), link_catalog)
 
 
-def aggregate_digest(per_channel: dict[str, dict]) -> str:
+def _format_catalog(link_catalog: list[tuple[str, str]]) -> str:
+    if not link_catalog:
+        return "(없음)"
+    return "\n".join(f"[{i}] {title} | {url}" for i, (title, url) in enumerate(link_catalog))
+
+
+def aggregate_digest(per_channel: dict[str, dict],
+                     link_catalog: list[tuple[str, str]]) -> list[dict]:
     parts = []
     for r in per_channel.values():
         s = r.get("summary", "").strip()
         if s:
             parts.append(s)
     if not parts:
-        return ""
+        return []
     combined = "\n\n---\n\n".join(parts)
-    return _llm_digest(META_PROMPT, combined)
+    user = f"시그널 메모:\n{combined}\n\n참조 가능한 링크:\n{_format_catalog(link_catalog)}"
+    return _llm_topics(META_PROMPT, user, link_catalog)
 
 
-REVIEW_PROMPT = """입력은 게시 직전의 마켓 다이제스트 초안이다. 점검·정리하여 최종본을 반환하라.
+REVIEW_PROMPT = """입력은 게시 직전의 뉴스레터형 다이제스트(주제+항목) JSON 초안이다.
+점검·정리하여 최종본을 반환하라.
 
 점검 항목:
-1. 같은 종목·이슈가 서로 다른 bullet/주제에 나뉘어 있으면 하나로 통합
-2. 의미가 거의 동일한 bullet은 하나로 합침 (사실·숫자 보존)
-3. 80자 초과 bullet은 핵심만 남기고 압축
-4. 사실상 같은 주제가 두 개 이상 헤더로 나뉘면 한 헤더로 통합
-5. 메타 표현 ("정리 필요", "요약하면", "주요 이슈는" 등) 잔존 시 제거
-6. 채널명·매체명·출처명 잔존 시 제거
-7. 빈 주제(헤더 아래 bullet 0개) 삭제
+1. 같은 종목·이슈가 여러 항목/주제에 흩어져 있으면 하나로 통합
+2. 의미가 거의 동일한 항목은 하나로 합침 (사실·숫자 보존)
+3. 사실상 같은 주제가 두 개 이상 헤더로 나뉘면 한 헤더로 통합
+4. headline/context의 메타 표현("요약하면","주요 이슈는" 등)·채널명·매체명·출처명 제거
+5. 빈 주제(항목 0개) 삭제
 
 규칙:
-- 형식 유지: "▸ 주제명" 헤더 + 그 아래 "- " bullet
+- 입력과 동일한 JSON 구조 유지: {"topics":[{"name","items":[{"headline","context","url"}]}]}
+- url 필드는 절대 변경·삭제·생성 금지. 입력 값을 그대로 보존.
 - 새 정보 추가 금지. 정리만.
-- 의미 있는 시그널이 사라지면 "" 반환
-
-JSON 응답: {"digest": "..."}
+- 의미 있는 시그널이 없으면 {"topics": []}
 """
 
 
-def review_digest(digest: str) -> str:
-    if not digest.strip():
-        return digest
-    return _llm_digest(REVIEW_PROMPT, digest)
+def review_digest(topics: list[dict],
+                  link_catalog: list[tuple[str, str]]) -> list[dict]:
+    if not topics:
+        return topics
+    draft = json.dumps({"topics": topics}, ensure_ascii=False)
+    return _llm_topics(REVIEW_PROMPT, draft, link_catalog)
+
+
+def render_digest(topics: list[dict]) -> str:
+    """정규화된 topics를 게시용 텍스트로 렌더링."""
+    blocks = []
+    for t in topics:
+        name = t["name"]
+        lines = [f"{_topic_emoji(name)} {name}"]
+        for it in t["items"]:
+            lines.append("")
+            lines.append(f"• {it['headline']}")
+            if it.get("context"):
+                lines.append(f"  {it['context']}")
+            if it.get("url"):
+                lines.append(f"  {it['url']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)

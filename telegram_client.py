@@ -26,7 +26,7 @@ async def fetch_new_messages(dialog, last_seen_id: int | None, lookback_minutes:
         since = None
 
     messages = []
-    async for msg in client.iter_messages(dialog.entity, limit=200):
+    async for msg in client.iter_messages(dialog.entity, limit=500):
         if last_seen_id is not None:
             if msg.id <= last_seen_id:
                 break

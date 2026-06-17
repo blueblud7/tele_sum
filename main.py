@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import telegram_client as tc
 import channel_selector as cs
 import summarizer
@@ -9,22 +10,11 @@ import repo
 import config
 
 
-def build_post_text(digest: str, link_entries: list[tuple[str, str]]) -> str:
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    if not digest and not link_entries:
+def build_post_text(digest: str) -> str:
+    if not digest:
         return ""
-
-    lines = [f"📰 시그널 요약 | {now}"]
-    if digest:
-        lines.append("")
-        lines.append(digest)
-
-    if link_entries:
-        lines.append("\n\n🔗 주요 링크")
-        for title, url in link_entries:
-            lines.append(f"- {title}\n  {url}")
-
-    return "\n".join(lines)
+    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
+    return f"📰 시그널 요약 | {now}\n\n{digest}"
 
 
 def collect_links(results: dict[str, dict], channel_data: dict[str, list[dict]],
@@ -116,12 +106,17 @@ async def main():
             },
         )
 
-    print("\n주제별 통합 다이제스트 생성 중...")
-    digest = summarizer.aggregate_digest(results)
+    # 항목에 인라인으로 붙일 링크 카탈로그 (뉴스 URL + 중요 메시지 t.me 링크)
+    link_catalog = collect_links(results, channel_data, dialog_by_name, max_total=40)
 
-    if digest:
+    print("\n주제별 통합 다이제스트 생성 중...")
+    topics = summarizer.aggregate_digest(results, link_catalog)
+
+    if topics:
         print("게시 전 리뷰·정리 중...")
-        digest = summarizer.review_digest(digest)
+        topics = summarizer.review_digest(topics, link_catalog)
+
+    digest = summarizer.render_digest(topics)
 
     if digest:
         all_collected = [m for msgs in channel_data.values() for m in msgs]
@@ -132,11 +127,10 @@ async def main():
             period_start=start,
             period_end=end,
             model=config.OPENAI_MODEL,
-            meta={"channels": list(channel_data.keys())},
+            meta={"channels": list(channel_data.keys()), "topics": topics},
         )
 
-    link_entries = collect_links(results, channel_data, dialog_by_name)
-    post_text = build_post_text(digest, link_entries)
+    post_text = build_post_text(digest)
     print("\n--- 게시 본문 ---")
     print(post_text or "(시그널 없음 — 게시 스킵)")
     print("--- ---")
