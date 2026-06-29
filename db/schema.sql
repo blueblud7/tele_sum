@@ -47,3 +47,33 @@ CREATE TABLE IF NOT EXISTS ingest_state (
     last_seen_id  BIGINT NOT NULL,
     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ── 파생 신호 사전계산 (tele_signals.py가 채움, reportportal 대시보드가 읽음) ──
+-- 매 윈도우(window_days)마다 DELETE 후 재삽입하는 방식이라 PK만 있으면 충분하다.
+
+-- ② 종목 회자수: 윈도우별 종목이 등장한 '메시지 수'
+CREATE TABLE IF NOT EXISTS tele_stock_mentions (
+    stock_name     TEXT NOT NULL,
+    window_days    INTEGER NOT NULL,
+    mention_count  INTEGER NOT NULL,
+    computed_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (stock_name, window_days)
+);
+
+-- ③ 테마: 윈도우별 상위 토큰(종목명 제외) 빈도 랭킹
+CREATE TABLE IF NOT EXISTS tele_themes (
+    window_days  INTEGER NOT NULL,
+    word         TEXT NOT NULL,
+    score        INTEGER NOT NULL,
+    rank         INTEGER NOT NULL,
+    computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (window_days, word)
+);
+
+-- ④ 총량: 윈도우별 메시지 건수
+CREATE TABLE IF NOT EXISTS tele_kpi (
+    window_days  INTEGER NOT NULL,
+    msg_count    INTEGER NOT NULL,
+    computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (window_days)
+);
