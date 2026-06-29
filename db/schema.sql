@@ -77,3 +77,24 @@ CREATE TABLE IF NOT EXISTS tele_kpi (
     computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (window_days)
 );
+
+-- ── 일/주/월 TOP10 빈도+뷰 브리프 (top_signals.py가 채움) ──
+-- period(daily/weekly/monthly) × dimension(stock/sector)별 상위 N개 종목·섹터를
+-- 텔레그램 회자수 + 리포트 빈도 + LLM 1~2줄 '시각'으로 적재. reportportal이 읽는다.
+CREATE TABLE IF NOT EXISTS top_signal_briefs (
+    id           BIGSERIAL PRIMARY KEY,
+    period       TEXT NOT NULL,          -- daily | weekly | monthly
+    dimension    TEXT NOT NULL,          -- stock | sector
+    rank         INTEGER NOT NULL,
+    name         TEXT NOT NULL,
+    tele_count   INTEGER NOT NULL DEFAULT 0,
+    report_count INTEGER NOT NULL DEFAULT 0,
+    view         TEXT,
+    as_of        DATE NOT NULL,
+    window_days  INTEGER NOT NULL,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (period, dimension, rank, as_of)
+);
+
+CREATE INDEX IF NOT EXISTS top_signal_briefs_lookup_idx
+    ON top_signal_briefs (period, dimension, as_of DESC, rank);
