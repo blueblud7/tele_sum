@@ -85,8 +85,6 @@ def process_day(day_kst, max_msgs: int, dry_run: bool):
 
     if dry_run:
         topics = summarizer.aggregate_digest(results, link_catalog)
-        if topics:
-            topics = summarizer.review_digest(topics, link_catalog)
         digest = summarizer.render_digest(topics)
         print(f"  [dry-run] digest {len(digest)}자, 채널요약 "
               f"{sum(1 for r in results.values() if r.get('summary','').strip())}개 (저장 안 함)")
@@ -112,8 +110,6 @@ def process_day(day_kst, max_msgs: int, dry_run: bool):
 
     # 통합 다이제스트 저장
     topics = summarizer.aggregate_digest(results, link_catalog)
-    if topics:
-        topics = summarizer.review_digest(topics, link_catalog)
     digest = summarizer.render_digest(topics)
     if digest:
         repo.save_summary(

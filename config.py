@@ -26,6 +26,8 @@ LOOKBACK_MINUTES = int(os.getenv("LOOKBACK_MINUTES", 15))
 MIN_MESSAGES = int(os.getenv("MIN_MESSAGES", 1))
 LANGUAGE = os.getenv("LANGUAGE", "korean")
 MAX_FORWARDS_PER_CHANNEL = int(os.getenv("MAX_FORWARDS_PER_CHANNEL", 3))
+# 채널별 요약을 동시에 돌릴 스레드 수 (openai 클라이언트가 동기라 I/O 병렬용). 레이트리밋 여유로 8.
+SUMMARY_WORKERS = int(os.getenv("SUMMARY_WORKERS", 8))
 
 CHANNEL_FILTER = [
     ch.strip()

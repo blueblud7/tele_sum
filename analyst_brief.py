@@ -18,6 +18,7 @@
 CREATE IF NOT EXISTS로 보장하고, 거기에만 INSERT 한다.
 """
 import sys
+import re
 import json
 import os
 from datetime import datetime, timedelta
@@ -232,35 +233,33 @@ def consensus_change(stock: str) -> dict | None:
 
 
 def render_change(ch: dict | None) -> str:
-    """결정적 마크다운 변화 블록 (숫자는 LLM 거치지 않음)."""
+    """컨센서스 변화를 '한 줄 요약'으로 압축 (숫자는 LLM 거치지 않음 · 결정적)."""
     if not ch:
         return ""
     if ch.get("first"):
-        return (f"## 컨센서스 변화\n- 첫 스냅샷({ch['curr_asof']}) — 비교 대상 없음. "
-                f"다음 컨센서스 갱신부터 변동 추적.\n")
-    lines = [f"## 컨센서스 변화 ({ch['prev_asof']} → {ch['curr_asof']})"]
+        return f"## 컨센서스 변화\n- 첫 스냅샷({ch['curr_asof']}) — 다음 갱신부터 변동 추적\n"
 
-    def fmt(label, d, unit="원"):
-        if d["new"] is None:
+    parts = []
+
+    def pct_part(label, d):
+        if d["new"] is None or d["pct"] is None:
             return None
-        if d["old"] is None:
-            return f"- {label}: {d['new']:,.0f}{unit} (신규)"
-        arrow = "▲" if d["new"] > d["old"] else ("▼" if d["new"] < d["old"] else "—")
-        pct = f" ({d['pct']:+.1f}%)" if d["pct"] is not None else ""
-        return f"- {label}: {d['old']:,.0f} → {d['new']:,.0f}{unit} {arrow}{pct}"
+        arrow = "▲" if d["pct"] > 0 else ("▼" if d["pct"] < 0 else "—")
+        return f"{label} {arrow}{abs(d['pct'])}%"
 
-    for label, key in [("목표가 평균", "target_avg"), ("목표가 중앙값", "target_median")]:
-        s = fmt(label, ch[key])
-        if s:
-            lines.append(s)
-    bc, rc = ch["broker_count"], ch["report_count"]
-    if bc["new"] is not None:
-        lines.append(f"- 커버 증권사: {int(bc['old'] or 0)} → {int(bc['new'])}곳")
-    if rc["new"] is not None:
-        lines.append(f"- 리포트 수: {int(rc['old'] or 0)} → {int(rc['new'])}건")
-    if ch["rating_prev"] != ch["rating_curr"]:
-        lines.append(f"- 투자의견 분포: {ch['rating_prev']} → {ch['rating_curr']}")
-    return "\n".join(lines) + "\n"
+    for label, key in [("목표가 평균", "target_avg"), ("중앙값", "target_median")]:
+        p = pct_part(label, ch[key])
+        if p:
+            parts.append(p)
+    for label, key, unit in [("리포트", "report_count", "건"), ("증권사", "broker_count", "곳")]:
+        d = ch[key]
+        if d["new"] is not None and d["old"] is not None:
+            diff = int(d["new"]) - int(d["old"])
+            if diff:
+                parts.append(f"{label} {diff:+d}{unit}")
+
+    summary = " · ".join(parts) if parts else "유의미한 변동 없음"
+    return f"## 컨센서스 변화 ({ch['prev_asof']} → {ch['curr_asof']})\n- {summary}\n"
 
 
 # ── 데이터 수집 + 브리프 생성 ─────────────────────────────────────────────
@@ -375,16 +374,52 @@ def build_brief(data: dict) -> str:
     return f"{head}{body}{footer}"
 
 
-def run_for(stock: str):
+def to_telegram(md: str) -> str:
+    """브리프 마크다운을 채널 평문(이모지+불릿) 스타일로 변환.
+    봇이 parse_mode 없이 보내므로 #, **, _ 같은 마크업이 글자로 노출되는 걸 막는다."""
+    out = []
+    for line in md.splitlines():
+        if line.strip() == "---":
+            out.append("━━━━━━━━━━")
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            level, title = len(m.group(1)), m.group(2)
+            if level == 1:
+                out.append(title)          # 제목 (이미 📊 포함)
+            else:
+                out.append("")             # 섹션 앞 빈 줄
+                out.append(f"▎{title}")    # 섹션 헤더
+            continue
+        out.append(re.sub(r"^(\s*)[-*]\s+", r"\1• ", line))  # 불릿 → •
+    text = "\n".join(out)
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)              # **굵게** 제거
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)       # _기울임_ 제거
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def run_for(stock: str, post: bool = False):
     data = gather(stock)
     content = build_brief(data)
     print(content)
     save_brief(data, content)
+    if post:
+        if not (data["consensus"] or data["messages"] or data["summaries"]):
+            print("[post 스킵] 수집 데이터 없음")
+        else:
+            import bot_poster
+            bot_poster.post(to_telegram(content))
+            print("[post] 채널 발행 완료")
 
 
 def main():
     ensure_schema()
     args = sys.argv[1:]
+
+    # --post: 생성한 브리프를 채널에도 발행 (기본은 DB 적재만).
+    post = "--post" in args
+    args = [a for a in args if a != "--post"]
 
     # 매 실행마다 현 컨센서스를 히스토리에 적재 (갱신분만 새 행). 온디맨드 종목도 누적됨.
     if not args or args[0] not in ("--list", "--add", "--remove"):
@@ -401,7 +436,7 @@ def main():
 
     targets = [" ".join(args).strip()] if args else load_watchlist()
     for stock in targets:
-        run_for(stock)
+        run_for(stock, post=post)
         print("\n" + "=" * 60 + "\n")
 
 

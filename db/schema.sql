@@ -98,3 +98,29 @@ CREATE TABLE IF NOT EXISTS top_signal_briefs (
 
 CREATE INDEX IF NOT EXISTS top_signal_briefs_lookup_idx
     ON top_signal_briefs (period, dimension, as_of DESC, rank);
+
+-- ── 채널 성장 지표: 일일 구독자 수 스냅샷 (channel_metrics.py가 채움) ──
+-- 어떤 게시물/시점 이후 구독자가 늘고 주는지 추적하는 기준선.
+CREATE TABLE IF NOT EXISTS tele_channel_metrics (
+    snapshot_date DATE NOT NULL,
+    subscribers   INTEGER,
+    snapshot_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (snapshot_date)
+);
+
+-- ── 게시물별 조회수/공유수 (channel_metrics.py가 Telethon으로 채움) ──
+-- 어떤 포맷이 실제로 읽히고 공유(forward)되는지 = 콘텐츠 실험의 측정 지표.
+-- (message_id, snapshot_date)로 일 1회 스냅샷 → 조회수 증가 시계열 확보.
+CREATE TABLE IF NOT EXISTS tele_post_metrics (
+    message_id    BIGINT NOT NULL,
+    snapshot_date DATE NOT NULL,
+    posted_at     TIMESTAMPTZ,
+    views         INTEGER,
+    forwards      INTEGER,
+    text_preview  TEXT,
+    snapshot_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (message_id, snapshot_date)
+);
+
+CREATE INDEX IF NOT EXISTS tele_post_metrics_recent_idx
+    ON tele_post_metrics (snapshot_date DESC, forwards DESC);

@@ -10,11 +10,29 @@ import repo
 import config
 
 
-def build_post_text(digest: str) -> str:
+# 하루 4회 슬롯별 정체성 (KST 발송 시각 → 이름). 예측 가능한 리듬을 준다.
+SLOT_NAMES = {7: "장전 브리핑", 12: "오전 마감", 16: "장 마감", 21: "미국장 셋업"}
+
+
+def build_post_text(digest: str, hl: dict | None = None) -> str:
     if not digest:
         return ""
-    now = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M")
-    return f"📰 시그널 요약 | {now}\n\n{digest}"
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
+    slot = SLOT_NAMES.get(now.hour)
+    stamp = now.strftime("%m-%d %H:%M")
+    head = "📰 시그널 요약"
+    if slot:
+        head += f" · {slot}"
+    head += f" | {stamp}"
+
+    parts = [head]
+    if hl and hl.get("tldr"):
+        lines = ["🔑 핵심 3줄"] + [f"• {t}" for t in hl["tldr"]]
+        parts.append("\n".join(lines))
+    parts.append(digest)
+    if hl and hl.get("tags"):
+        parts.append("🏷 " + " ".join(f"#{t}" for t in hl["tags"]))
+    return "\n\n".join(parts)
 
 
 def collect_links(results: dict[str, dict], channel_data: dict[str, list[dict]],
@@ -112,11 +130,8 @@ async def main():
     print("\n주제별 통합 다이제스트 생성 중...")
     topics = summarizer.aggregate_digest(results, link_catalog)
 
-    if topics:
-        print("게시 전 리뷰·정리 중...")
-        topics = summarizer.review_digest(topics, link_catalog)
-
     digest = summarizer.render_digest(topics)
+    hl = summarizer.highlights(topics)
 
     if digest:
         all_collected = [m for msgs in channel_data.values() for m in msgs]
@@ -130,7 +145,7 @@ async def main():
             meta={"channels": list(channel_data.keys()), "topics": topics},
         )
 
-    post_text = build_post_text(digest)
+    post_text = build_post_text(digest, hl)
     print("\n--- 게시 본문 ---")
     print(post_text or "(시그널 없음 — 게시 스킵)")
     print("--- ---")
@@ -141,8 +156,16 @@ async def main():
     if post_text:
         print(f"\n봇으로 {config.TARGET_CHANNEL} 게시 중...")
         try:
-            bot_poster.post(post_text)
+            ids = bot_poster.post(post_text)
             print("게시 완료")
+            # 장전(07시) 브리핑만 핀 고정 → 하루 종일 신규 방문자에게 첫인상으로 노출.
+            if datetime.now(ZoneInfo("Asia/Seoul")).hour == 7 and ids:
+                try:
+                    bot_poster.unpin_all()
+                    bot_poster.pin(ids[0])
+                    print("장전 브리핑 핀 고정")
+                except Exception as e:
+                    print(f"핀 고정 실패(무시): {e}")
         except Exception as e:
             print(f"게시 실패 (이번 회차 스킵, 커서는 이미 진행됨): {e}")
     else:

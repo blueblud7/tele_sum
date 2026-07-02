@@ -1,5 +1,6 @@
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 import config
 
@@ -102,11 +103,27 @@ def summarize_channel(channel_name: str, messages: list[dict]) -> dict:
     return {"summary": summary, "important_ids": important_ids, "links": valid_links}
 
 
+def _safe_summarize(name: str, messages: list[dict]) -> dict:
+    try:
+        return summarize_channel(name, messages)
+    except Exception as e:  # 한 채널 실패가 전체 회차를 막지 않도록
+        print(f"  [!] {name} 요약 실패(스킵): {e}")
+        return {"summary": "", "important_ids": [], "links": []}
+
+
 def summarize_all(channel_data: dict[str, list[dict]]) -> dict[str, dict]:
+    """채널별 요약을 스레드풀로 동시 실행. 결과는 원본 채널 순서로 반환."""
+    items = list(channel_data.items())
+    total = len(items)
+    if not items:
+        return {}
+    workers = max(1, min(config.SUMMARY_WORKERS, total))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(_safe_summarize, name, msgs) for name, msgs in items]
+
     results = {}
-    total = len(channel_data)
-    for i, (name, messages) in enumerate(channel_data.items(), 1):
-        r = summarize_channel(name, messages)
+    for i, ((name, _), fut) in enumerate(zip(items, futures), 1):
+        r = fut.result()
         s = r.get("summary", "").strip()
         preview = (s[:120] + "…") if len(s) > 120 else (s or "(시그널 없음)")
         print(f"  [{i}/{total}] {name} → {preview}")
@@ -128,7 +145,9 @@ JSON 응답:
 
 규칙:
 - 주제는 자연스럽게 분류 (예: 글로벌 매크로, 반도체, 한국 종목, 바이오 등).
-- 같은 이슈는 한 번만 (중복 제거).
+- 같은 이슈는 한 번만 (중복 제거). 같은 종목·이슈가 여러 항목/주제에 흩어지면 하나로 통합.
+- 의미가 거의 동일한 항목은 하나로 합침 (사실·숫자는 보존).
+- 사실상 같은 주제가 두 개 이상 헤더로 나뉘면 한 헤더로 통합.
 - headline: 한 문장. 사실·숫자·종목명 중심. 채널명·매체명·출처명 금지.
 - context: 한 문장. 의미·배경·파급. 메타 표현 금지("요약하면","주요 이슈는","다음과 같다" 등).
 - ref: headline의 내용과 일치하는 링크가 목록에 있으면 반드시 그 번호를 넣어라(주제·종목·사건이 같으면 매칭). 일치하는 링크가 없을 때만 null. 없는 번호 합성 금지.
@@ -269,30 +288,46 @@ def aggregate_digest(per_channel: dict[str, dict],
     return _llm_topics(META_PROMPT, user, link_catalog)
 
 
-REVIEW_PROMPT = """입력은 게시 직전의 뉴스레터형 다이제스트(주제+항목) JSON 초안이다.
-점검·정리하여 최종본을 반환하라.
+HIGHLIGHT_PROMPT = """입력은 게시될 마켓 다이제스트(주제+항목) JSON이다.
+구독자가 3초 안에 핵심을 파악하도록 상단 요약을 만들어라.
 
-점검 항목:
-1. 같은 종목·이슈가 여러 항목/주제에 흩어져 있으면 하나로 통합
-2. 의미가 거의 동일한 항목은 하나로 합침 (사실·숫자 보존)
-3. 사실상 같은 주제가 두 개 이상 헤더로 나뉘면 한 헤더로 통합
-4. headline/context의 메타 표현("요약하면","주요 이슈는" 등)·채널명·매체명·출처명 제거
-5. 빈 주제(항목 0개) 삭제
+JSON 응답:
+{"tldr": ["가장 중요한 항목 한 줄", ...최대 3개],
+ "tags": ["종목명 또는 핵심 테마", ...최대 5개]}
 
 규칙:
-- 입력과 동일한 JSON 구조 유지: {"topics":[{"name","items":[{"headline","context","url"}]}]}
-- url 필드는 절대 변경·삭제·생성 금지. 입력 값을 그대로 보존.
-- 새 정보 추가 금지. 정리만.
-- 의미 있는 시그널이 없으면 {"topics": []}
+- tldr: 다이제스트에서 시장 영향이 가장 큰 3개를 골라 각각 한 줄(35자 이내). 숫자·종목명 포함. 새 사실 창작 금지.
+- tags: 다이제스트에 실제 등장한 종목명/테마 키워드. 공백 없는 단일 토큰(예: 삼성전자, SK하이닉스, 반도체, 금리). 해시태그용이라 공백·특수문자 금지.
+- 빈약하면 가능한 만큼만. 시그널 없으면 {"tldr":[],"tags":[]}.
 """
 
 
-def review_digest(topics: list[dict],
-                  link_catalog: list[tuple[str, str]]) -> list[dict]:
+def highlights(topics: list[dict]) -> dict:
+    """다이제스트 상단용 핵심 3줄(tldr) + 해시태그(tags) 생성. 실패해도 게시를 막지 않음."""
     if not topics:
-        return topics
+        return {"tldr": [], "tags": []}
     draft = json.dumps({"topics": topics}, ensure_ascii=False)
-    return _llm_topics(REVIEW_PROMPT, draft, link_catalog)
+    try:
+        resp = openai_client.chat.completions.create(
+            model=config.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": HIGHLIGHT_PROMPT},
+                {"role": "user", "content": draft},
+            ],
+            max_completion_tokens=2000,  # gpt-5-nano 추론 토큰 여유 (작으면 출력 0)
+            reasoning_effort="low",
+            response_format={"type": "json_object"},
+        )
+        data = json.loads((resp.choices[0].message.content or "").strip())
+    except Exception:
+        return {"tldr": [], "tags": []}
+    tldr = [str(x).strip() for x in data.get("tldr", []) if str(x).strip()][:3]
+    tags = []
+    for x in data.get("tags", []):
+        t = re.sub(r"[^0-9A-Za-z가-힣]", "", str(x))  # 해시태그 안전화 (공백·특수문자 제거)
+        if t and t not in tags:
+            tags.append(t)
+    return {"tldr": tldr, "tags": tags[:5]}
 
 
 def render_digest(topics: list[dict]) -> str:
