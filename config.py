@@ -13,7 +13,9 @@ TARGET_CHANNEL = os.getenv("TARGET_CHANNEL", "")
 # 모든 발송물 하단 서명 (공유·캡처 시 출처/구독 유도). 빈 문자열이면 푸터 미부착.
 # @핸들일 때만 자동 기본값 생성, 숫자 chat_id면 기본 비활성(중복/노출 방지).
 _default_footer = (
-    f"━━━━━━━━━━\n📡 {TARGET_CHANNEL} · 100+ 채널·증권사 리포트 교차 신호"
+    f"━━━━━━━━━━\n"
+    f"📡 {TARGET_CHANNEL} · 100+ 채널·증권사 리포트 교차 신호\n"
+    f"🔎 전체 라이브 뷰 → https://briefedge.blueming.net/live"
     if TARGET_CHANNEL.startswith("@")
     else ""
 )
