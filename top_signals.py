@@ -328,7 +328,7 @@ def run_period(conn, period: str, today, *, post: bool, persist: bool) -> str:
         save(conn, period, as_of, days, stocks, sectors)
         print(f"[{period}] DB 적재 완료 (종목 {len(stocks)}·섹터 {len(sectors)})")
     if post:
-        bot_poster.post(report)
+        bot_poster.post(report, kind="top_signals", meta={"period": period})
         print(f"[{period}] 텔레그램 게시 완료")
     return report
 

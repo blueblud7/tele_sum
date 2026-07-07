@@ -161,7 +161,7 @@ def main():
     report = render(items, nar, start, end)
     print(report)
     if not args.no_post:
-        bot_poster.post(report)
+        bot_poster.post(report, kind="weekly_recap")
         print("\n[게시 완료]")
 
 

@@ -124,3 +124,23 @@ CREATE TABLE IF NOT EXISTS tele_post_metrics (
 
 CREATE INDEX IF NOT EXISTS tele_post_metrics_recent_idx
     ON tele_post_metrics (snapshot_date DESC, forwards DESC);
+
+-- ── 발송한 게시물 원본 (bot_poster.post가 발송 시점에 채움) ──
+-- "무엇을 실제로 내보냈는가"의 단일 진실원본. 사후 스캔(tele_post_metrics)과 달리
+-- 발송 순간의 완성본(푸터 포함)·청크별 message_id·종류를 그대로 남긴다.
+-- message_id 로 tele_post_metrics(조회/공유수)와 조인해 포맷별 성과를 볼 수 있다.
+CREATE TABLE IF NOT EXISTS tele_sent_posts (
+    id           BIGSERIAL PRIMARY KEY,
+    kind         TEXT NOT NULL DEFAULT 'post',  -- digest | top_signals | analyst_brief | weekly_recap
+    text         TEXT NOT NULL,                 -- 실제 발송 완성본 (푸터 포함, 청크 합본)
+    message_ids  BIGINT[] NOT NULL,             -- 전송된 청크별 message_id (첫 원소 = 헤더/핀 대상)
+    chat         TEXT,                          -- TARGET_CHANNEL
+    pinned       BOOLEAN NOT NULL DEFAULT FALSE,
+    meta         JSONB,
+    sent_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS tele_sent_posts_kind_sent_idx
+    ON tele_sent_posts (kind, sent_at DESC);
+CREATE INDEX IF NOT EXISTS tele_sent_posts_message_ids_idx
+    ON tele_sent_posts USING GIN (message_ids);

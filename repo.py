@@ -66,6 +66,48 @@ def save_summary(
         )
 
 
+def save_sent_post(
+    *,
+    kind: str,
+    text: str,
+    message_ids: list[int],
+    chat: str | None = None,
+    pinned: bool = False,
+    meta: dict | None = None,
+) -> int | None:
+    """실제로 발송된 게시물을 tele_sent_posts에 기록. 새 행 id 반환.
+    message_ids가 비면(=발송 실패) 저장하지 않고 None 반환."""
+    ids = [int(m) for m in message_ids if m is not None]
+    if not ids:
+        return None
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO tele_sent_posts (kind, text, message_ids, chat, pinned, meta)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            RETURNING id
+            """,
+            (
+                kind,
+                text,
+                ids,
+                chat,
+                pinned,
+                json.dumps(meta or {}, ensure_ascii=False, default=str),
+            ),
+        )
+        return cur.fetchone()[0]
+
+
+def mark_pinned(message_id: int) -> None:
+    """해당 message_id를 포함한 발송 기록을 pinned=TRUE로 표시 (best-effort)."""
+    with db.connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE tele_sent_posts SET pinned = TRUE WHERE %s = ANY(message_ids)",
+            (int(message_id),),
+        )
+
+
 def message_window(msgs: list[dict]) -> tuple[datetime, datetime]:
     """메시지 목록의 [최소 posted_at, 최대 posted_at] 반환. 비어 있으면 (now, now)."""
     if not msgs:

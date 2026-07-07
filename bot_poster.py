@@ -57,9 +57,11 @@ def _raise(msg: str):
     raise RuntimeError(f"Bot post rejected: {msg}")
 
 
-def post(text: str, footer: bool = True) -> list[int]:
+def post(text: str, footer: bool = True, kind: str = "post",
+         meta: dict | None = None) -> list[int]:
     """봇으로 TARGET_CHANNEL에 텍스트 메시지 게시. 길면 분할, 실패 시 재시도.
     footer=True면 마지막 청크 끝에 config.CHANNEL_FOOTER(채널 서명)를 부착.
+    발송 완성본(푸터 포함)은 tele_sent_posts에 기록된다(best-effort).
     전송된 message_id 목록 반환 (첫 청크 = 헤더/핵심)."""
     body = text.rstrip()
     if footer and config.CHANNEL_FOOTER:
@@ -69,7 +71,22 @@ def post(text: str, footer: bool = True) -> list[int]:
         mid = _send_one(chunk)
         if mid is not None:
             ids.append(mid)
+    _record(kind, body, ids, meta)
     return ids
+
+
+def _record(kind: str, body: str, ids: list[int], meta: dict | None) -> None:
+    """발송 원본을 DB에 남긴다. 저장 실패가 발송을 막지 않도록 예외는 삼킨다."""
+    if not ids:
+        return
+    try:
+        import repo
+        repo.save_sent_post(
+            kind=kind, text=body, message_ids=ids,
+            chat=config.TARGET_CHANNEL, meta=meta,
+        )
+    except Exception as e:
+        print(f"발송 기록 저장 실패(무시): {e}")
 
 
 def pin(message_id: int, disable_notification: bool = True) -> None:

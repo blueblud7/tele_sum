@@ -156,13 +156,14 @@ async def main():
     if post_text:
         print(f"\n봇으로 {config.TARGET_CHANNEL} 게시 중...")
         try:
-            ids = bot_poster.post(post_text)
+            ids = bot_poster.post(post_text, kind="digest")
             print("게시 완료")
             # 장전(07시) 브리핑만 핀 고정 → 하루 종일 신규 방문자에게 첫인상으로 노출.
             if datetime.now(ZoneInfo("Asia/Seoul")).hour == 7 and ids:
                 try:
                     bot_poster.unpin_all()
                     bot_poster.pin(ids[0])
+                    repo.mark_pinned(ids[0])
                     print("장전 브리핑 핀 고정")
                 except Exception as e:
                     print(f"핀 고정 실패(무시): {e}")

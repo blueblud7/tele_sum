@@ -409,7 +409,7 @@ def run_for(stock: str, post: bool = False):
             print("[post 스킵] 수집 데이터 없음")
         else:
             import bot_poster
-            bot_poster.post(to_telegram(content))
+            bot_poster.post(to_telegram(content), kind="analyst_brief")
             print("[post] 채널 발행 완료")
 
 
